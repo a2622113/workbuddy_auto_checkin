@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""wb_auto.py —— 云端 runner 执行的每日自动化：签到 + 派猫猫旅行，结果推 PushPlus。
+"""wb_auto.py —— 云端 runner 执行的每日自动化：签到 + 派猫猫旅行，失败时推 PushPlus。
 
 设计要点：
   1. 一次运行把签到与派猫都做掉；
   2. 先领已到家的旅行积分，再判断能否派新一趟；今日名额已用则不派；
   3. 签到与猫猫状态分开汇报；
   4. 猫猫失败不污染签到结论 —— 签到成功即整体成功；
-  5. 结果推送到 PushPlus（微信）。
+  5. PushPlus 只在签到失败时推送（成功静默，不打扰）。
 
 凭证来自 GitHub Secret（由本机 refresh_token.py 注入），只读环境变量，不落盘、不打日志。
 """
@@ -291,7 +291,7 @@ def run_buddy(headers, endpoint):
 # ---------------------------------------------------------------- PushPlus
 
 def push_pushplus(token, title, content):
-    """PushPlus 微信推送。"""
+    """PushPlus 微信推送。只在失败时调用。"""
     if not token:
         log("  [PushPlus] 未配置 PUSHPLUS_TOKEN，跳过")
         return False
@@ -352,22 +352,17 @@ def main():
     checkin_line = ("✅ " if checkin_ok else "❌ ") + checkin["report"]
     buddy_line = ("🐱 " + buddy.get("report", "")) if buddy.get("report") else "🐱 无结论"
 
-    # ▼▼▼ PushPlus 推送 ▼▼▼
-    # 【默认】成功和失败都推送
-    if overall_ok:
-        title = "✅ WorkBuddy 签到成功"
+    # ▼ PushPlus：只在签到失败时推送（成功静默，不打扰） ▼
+    if not overall_ok:
+        log("  [PushPlus] 签到未达成，推送失败通知")
+        push_pushplus(
+            pushplus_token,
+            "❌ WorkBuddy 签到失败",
+            "签到：%s\n猫猫：%s" % (checkin_line, buddy_line),
+        )
     else:
-        title = "❌ WorkBuddy 签到失败"
-    content = "签到：%s\n猫猫：%s" % (checkin_line, buddy_line)
-    log("  [PushPlus] 推送结果（%s）" % ("成功" if overall_ok else "失败"))
-    push_pushplus(pushplus_token, title, content)
-
-    # 【如果只想在失败时推送】把上面 6 行删掉，换成下面这 3 行：
-    # if not overall_ok:
-    #     log("  [PushPlus] 签到未达成，推送失败通知")
-    #     push_pushplus(pushplus_token, "❌ WorkBuddy 签到失败",
-    #                   "签到：%s\n猫猫：%s" % (checkin_line, buddy_line))
-    # ▲▲▲ PushPlus 推送 ▲▲▲
+        log("  [PushPlus] 签到成功，按配置静默，不推送")
+    # ▲ PushPlus ▲
 
     result = {
         "checkin": {"ok": checkin_ok, **checkin},
