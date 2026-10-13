@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""wb_auto.py —— 云端 runner 执行的每日自动化：签到 + 派猫猫旅行，结果推飞书。
+"""wb_auto.py —— 云端 runner 执行的每日自动化：签到 + 派猫猫旅行，结果推 PushPlus。
 
 设计要点：
   1. 一次运行把签到与派猫都做掉；
   2. 先领已到家的旅行积分，再判断能否派新一趟；今日名额已用则不派；
   3. 签到与猫猫状态分开汇报；
   4. 猫猫失败不污染签到结论 —— 签到成功即整体成功；
-  5. PushPlus 仅在签到失败时推送（成功静默）。
+  5. 结果推送到 PushPlus（微信）。
 
 凭证来自 GitHub Secret（由本机 refresh_token.py 注入），只读环境变量，不落盘、不打日志。
 """
@@ -288,49 +288,10 @@ def run_buddy(headers, endpoint):
         return {"result": "ERROR", "report": "猫猫模块异常（%s: %s）" % (type(e).__name__, e), "notes": notes}
 
 
-# ---------------------------------------------------------------- 飞书
-
-def push_feishu(webhook, title, checkin_line, buddy_line, overall_ok):
-    """推送到飞书自定义机器人。签到与猫猫状态分开成行。"""
-    color = "green" if overall_ok else "red"
-    lines = [
-        "**%s**" % title,
-        "",
-        "**签到**",
-        checkin_line,
-        "",
-        "**猫猫旅行**",
-        buddy_line,
-    ]
-    payload = {
-        "msg_type": "interactive",
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": color,
-                "title": {"tag": "plain_text",
-                          "content": "Buddy 加油站 · %s" % ("成功" if overall_ok else "部分失败")},
-            },
-            "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}}],
-        },
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(webhook, data=data, method="POST",
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context()) as resp:
-            body = json.loads(resp.read().decode("utf-8", "replace"))
-            log("  [飞书] HTTP %s %s" % (resp.status, json.dumps(body, ensure_ascii=False)))
-            return body.get("code") == 0
-    except Exception as e:
-        log("  [飞书] 推送失败：%s: %s" % (type(e).__name__, e))
-        return False
-
-
 # ---------------------------------------------------------------- PushPlus
 
 def push_pushplus(token, title, content):
-    """PushPlus 微信推送。仅在失败时调用，成功静默。"""
+    """PushPlus 微信推送。"""
     if not token:
         log("  [PushPlus] 未配置 PUSHPLUS_TOKEN，跳过")
         return False
@@ -360,15 +321,12 @@ def push_pushplus(token, title, content):
 
 def main():
     token = os.environ.get("WB_ACCESS_TOKEN")
-    webhook = os.environ.get("FEISHU_WEBHOOK")
     pushplus_token = os.environ.get("PUSHPLUS_TOKEN")
     endpoint = os.environ.get("WB_ENDPOINT") or DEFAULT_ENDPOINT
 
     if not token:
         log("缺少环境变量 WB_ACCESS_TOKEN（请在本机运行 refresh_token.py 注入 GitHub Secret）")
         return 2
-    if not webhook:
-        log("缺少环境变量 FEISHU_WEBHOOK")
 
     headers = {
         "Accept": "application/json",
@@ -394,16 +352,22 @@ def main():
     checkin_line = ("✅ " if checkin_ok else "❌ ") + checkin["report"]
     buddy_line = ("🐱 " + buddy.get("report", "")) if buddy.get("report") else "🐱 无结论"
 
-    if webhook:
-        push_feishu(webhook, "每日自动化", checkin_line, buddy_line, overall_ok)
+    # ▼▼▼ PushPlus 推送 ▼▼▼
+    # 【默认】成功和失败都推送
+    if overall_ok:
+        title = "✅ WorkBuddy 签到成功"
+    else:
+        title = "❌ WorkBuddy 签到失败"
+    content = "签到：%s\n猫猫：%s" % (checkin_line, buddy_line)
+    log("  [PushPlus] 推送结果（%s）" % ("成功" if overall_ok else "失败"))
+    push_pushplus(pushplus_token, title, content)
 
-    # PushPlus：仅在签到失败时推送（成功静默，不打扰）
-    if not overall_ok:
-        push_pushplus(
-            pushplus_token,
-            "❌ WorkBuddy 签到失败",
-            "签到：%s\n猫猫：%s" % (checkin_line, buddy_line),
-        )
+    # 【如果只想在失败时推送】把上面 6 行删掉，换成下面这 3 行：
+    # if not overall_ok:
+    #     log("  [PushPlus] 签到未达成，推送失败通知")
+    #     push_pushplus(pushplus_token, "❌ WorkBuddy 签到失败",
+    #                   "签到：%s\n猫猫：%s" % (checkin_line, buddy_line))
+    # ▲▲▲ PushPlus 推送 ▲▲▲
 
     result = {
         "checkin": {"ok": checkin_ok, **checkin},
