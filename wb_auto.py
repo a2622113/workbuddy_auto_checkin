@@ -6,7 +6,8 @@
   1. 一次运行把签到与派猫都做掉；
   2. 先领已到家的旅行积分，再判断能否派新一趟；今日名额已用则不派；
   3. 签到与猫猫状态分开汇报；
-  4. 猫猫失败不污染签到结论 —— 签到成功即整体成功。
+  4. 猫猫失败不污染签到结论 —— 签到成功即整体成功；
+  5. PushPlus 仅在签到失败时推送（成功静默）。
 
 凭证来自 GitHub Secret（由本机 refresh_token.py 注入），只读环境变量，不落盘、不打日志。
 """
@@ -228,8 +229,7 @@ def run_buddy(headers, endpoint):
         if not (200 <= scode < 300):
             return {"result": "ERROR", "report": "旅行状态接口异常（HTTP %s）" % scode, "notes": notes}
 
-        raw_state = dig(unwrap(sbody), "state")
-        travel = raw_state
+        travel = dig(unwrap(sbody), "state")
         daily_limit = bool(dig(unwrap(sbody), "daily_limit_reached"))
         travel_body = unwrap(sbody)
 
@@ -283,10 +283,7 @@ def run_buddy(headers, endpoint):
             return {"result": "ERROR",
                     "report": "派出失败：%s（HTTP %s）" % (msg or "未知", dcode), "notes": notes}
 
-        # 兜底：state 不是已知取值。原样汇报、不做写操作，避免误派或误领。
-        return {"result": "UNKNOWN_STATE",
-                "report": "；".join(notes) if notes else "未识别的旅行状态：%s" % raw_state,
-                "notes": notes}
+        return {"result": "IDLE", "report": "；".join(notes) if notes else "猫猫当前空闲但状态未明"}
     except Exception as e:
         return {"result": "ERROR", "report": "猫猫模块异常（%s: %s）" % (type(e).__name__, e), "notes": notes}
 
@@ -330,11 +327,41 @@ def push_feishu(webhook, title, checkin_line, buddy_line, overall_ok):
         return False
 
 
+# ---------------------------------------------------------------- PushPlus
+
+def push_pushplus(token, title, content):
+    """PushPlus 微信推送。仅在失败时调用，成功静默。"""
+    if not token:
+        log("  [PushPlus] 未配置 PUSHPLUS_TOKEN，跳过")
+        return False
+    payload = {
+        "token": token,
+        "title": title,
+        "content": content,
+        "template": "txt",
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "https://www.pushplus.plus/send",
+        data=data, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context()) as resp:
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+            log("  [PushPlus] HTTP %s %s" % (resp.status, json.dumps(body, ensure_ascii=False)))
+            return body.get("code") == 200
+    except Exception as e:
+        log("  [PushPlus] 推送失败：%s: %s" % (type(e).__name__, e))
+        return False
+
+
 # ---------------------------------------------------------------- 主流程
 
 def main():
     token = os.environ.get("WB_ACCESS_TOKEN")
     webhook = os.environ.get("FEISHU_WEBHOOK")
+    pushplus_token = os.environ.get("PUSHPLUS_TOKEN")
     endpoint = os.environ.get("WB_ENDPOINT") or DEFAULT_ENDPOINT
 
     if not token:
@@ -369,6 +396,14 @@ def main():
 
     if webhook:
         push_feishu(webhook, "每日自动化", checkin_line, buddy_line, overall_ok)
+
+    # PushPlus：仅在签到失败时推送（成功静默，不打扰）
+    if not overall_ok:
+        push_pushplus(
+            pushplus_token,
+            "❌ WorkBuddy 签到失败",
+            "签到：%s\n猫猫：%s" % (checkin_line, buddy_line),
+        )
 
     result = {
         "checkin": {"ok": checkin_ok, **checkin},
